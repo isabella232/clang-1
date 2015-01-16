@@ -128,6 +128,10 @@ def TestAfterDivZeroChecker : Checker<"TestAfterDivZero">,
   HelpText<"Check for division by variable that is later compared against 0. Either the comparison is useless or there is division by zero.">,
   DescFile<"TestAfterDivZeroChecker.cpp">;
 
+def LibeventChecker : Checker<"Libevent">,
+  HelpText<"Check for misuses of libevent library APIs">,
+  DescFile<"LibeventChecker.cpp">;
+
 } // end "alpha.core"
 
 //===----------------------------------------------------------------------===//
