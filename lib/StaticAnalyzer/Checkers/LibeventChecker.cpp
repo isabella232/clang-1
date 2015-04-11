@@ -28,13 +28,15 @@ typedef SmallVector<SymbolRef, 2> SymbolVector;
 
 struct EventState {
 private:
-  enum Kind { Created, Destroyed } K;
+  enum Kind { Null, Created, Destroyed } K;
   EventState(Kind InK) : K(InK) { }
 
 public:
+  bool isNull() const { return K == Null; }
   bool isCreated() const { return K == Created; }
   bool isDestroyed() const { return K == Destroyed; }
 
+  static EventState getNull() { return EventState(Null); }
   static EventState getCreated() { return EventState(Created); }
   static EventState getDestroyed() { return EventState(Destroyed); }
 
@@ -53,11 +55,15 @@ class LibeventChecker : public Checker<check::PostCall,
 
   mutable IdentifierInfo *IIevent_new, *IIevent_free;
 
+  std::unique_ptr<BugType> UnitializedBugType;
   std::unique_ptr<BugType> DoubleDestroyBugType;
   std::unique_ptr<BugType> LeakBugType;
 
   void initIdentifierInfo(ASTContext &Ctx) const;
 
+  void reportUnitialized(SymbolRef EventDescSym,
+                         const CallEvent &Call,
+                         CheckerContext &C) const;
   void reportDoubleDestroy(SymbolRef EventDescSym,
                            const CallEvent &Call,
                            CheckerContext &C) const;
@@ -107,6 +113,9 @@ public:
 LibeventChecker::LibeventChecker()
     : IIevent_new(nullptr), IIevent_free(nullptr) {
   // Initialize the bug types.
+  UnitializedBugType.reset(
+      new BugType(this, "Unitialized event", "Libevent API Error"));
+
   DoubleDestroyBugType.reset(
       new BugType(this, "Double event_free", "Libevent API Error"));
 
@@ -152,12 +161,18 @@ void LibeventChecker::checkPreCall(const CallEvent &Call,
 
   // Get the symbolic value corresponding to the event.
   SymbolRef EventDesc = Call.getArgSVal(0).getAsSymbol();
-  if (!EventDesc)
+  if (!EventDesc) {
+    reportUnitialized(EventDesc, Call, C);
     return;
+  }
 
-  // Check if the event has already been destroyed.
   ProgramStateRef State = C.getState();
   const EventState *ES = State->get<EventMap>(EventDesc);
+  if (ES && ES->isNull()) {
+    reportUnitialized(EventDesc, Call, C);
+    return;
+  }
+  // Check if the event has already been destroyed.
   if (ES && ES->isDestroyed()) {
     reportDoubleDestroy(EventDesc, Call, C);
     return;
@@ -201,6 +216,23 @@ void LibeventChecker::checkDeadSymbols(SymbolReaper &SymReaper,
 
   ExplodedNode *N = C.addTransition(State);
   reportLeaks(LeakedEvents, C, N);
+}
+
+void LibeventChecker::reportUnitialized(SymbolRef EventDescSym,
+                                        const CallEvent &Call,
+                                        CheckerContext &C) const {
+  // We reached a bug, stop exploring the path here by generating a sink.
+  ExplodedNode *ErrNode = C.generateSink();
+  // If we've already reached this node on another path, return.
+  if (!ErrNode)
+    return;
+
+  // Generate the report.
+  BugReport *R = new BugReport(*UnitializedBugType,
+      "Unitialized event", ErrNode);
+  R->addRange(Call.getSourceRange());
+  R->markInteresting(EventDescSym);
+  C.emitReport(R);
 }
 
 void LibeventChecker::reportDoubleDestroy(SymbolRef EventDescSym,
